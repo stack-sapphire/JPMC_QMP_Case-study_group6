@@ -1,0 +1,5 @@
+# 🧪 Model Tuning Log
+
+| Date & Time | FF Thresh | CR Thresh | SR Thresh | Q Thresh | Overall Accuracy |
+|---|---|---|---|---|---|
+| 2026-06-12 17:45:06 | 0.05 | 45.0 | 0.12 | 0.001 | **79.95%** |
