@@ -16,8 +16,9 @@ from p3_regime_classifier import build_streaming_features, RegimeClassifier
 
 def log_and_push_to_github(ff, cr, sr, q, acc):
     """Automatically logs the run to a Markdown file and pushes to GitHub."""
-    # Fixed: Removed ../ so it saves directly into the main project folder
-    log_file = "experiment_log.md"
+    # This specifically forces the file to stay in your project's main folder
+    log_file = "experiment_log.md" 
+    
     file_exists = os.path.isfile(log_file)
     
     with open(log_file, "a") as f:
@@ -30,13 +31,11 @@ def log_and_push_to_github(ff, cr, sr, q, acc):
     print(f"\n📝 Logged results locally to {log_file}")
     
     print("☁️ Pushing iteration to GitHub...")
-    # Fixed: Updated subprocess paths to run smoothly from the root folder
     subprocess.run(["git", "add", "experiment_log.md", "src/p5_backtester.py"])
     commit_msg = f"Tuning iteration: Accuracy {acc*100:.2f}%"
     subprocess.run(["git", "commit", "-m", commit_msg])
     subprocess.run(["git", "push"])
-    print("✅ Successfully synced to GitHub! Your teammates can now see the results.")
-
+    print("✅ Successfully synced to GitHub!")
 def run_backtest():
     print("="*60)
     print("🚀 INITIATING WEDNESDAY BACKTEST 🚀")
