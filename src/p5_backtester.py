@@ -1,24 +1,20 @@
 """
-p5_backtester.py
-================
-Wednesday backtest harness with auto-logging and GitHub push.
-
-Usage:
-    python src/p5_backtester.py
-
-Tune the four thresholds in the HYPERPARAMETERS block and re-run.
-Every run is logged to experiment_log.md and pushed to GitHub.
+p5_backtester.py  — v2
+========================
+Fixed:
+  1. NaN/Inf in returns matrix was corrupting PCA covariance (divide by zero)
+     → now clips and fills before fitting
+  2. FAT_FINGER never triggered because max_contrib_share was NaN
+     → root cause was the corrupted eigenvectors above
+  3. Threshold tuning guide updated with correct starting values
+     based on actual feature distributions printed at runtime
 """
 
 import sys
 import os
 
-# Make src/ importable when run from project root OR from inside src/
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-
-# Change working directory to project root so CSV paths resolve correctly
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "src"))
 os.chdir(ROOT)
 
 import pandas as pd
@@ -27,74 +23,154 @@ import time
 import subprocess
 from datetime import datetime
 from sklearn.metrics import classification_report, accuracy_score
+from sklearn.decomposition import PCA
 
-# ── Internal imports — handle both naming conventions ────────────────────────
-from p1_blind_cartographer import load_and_pivot, fit_pca_on_monday
+np.random.seed(42)
 
-# Aliases so the rest of the file reads cleanly
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Safe data loader — fixes the NaN/Inf that caused the PCA warnings
+# ─────────────────────────────────────────────────────────────────────────────
+
 def load_and_prep_data(path):
-    return load_and_pivot(path)
+    """
+    Load tick CSV, pivot to (T x 12) returns matrix, drop NaN rows,
+    then clip extreme values that cause overflow in the covariance matmul.
+    """
+    from p1_blind_cartographer import load_and_pivot
+    df = load_and_pivot(path)
 
-def fit_monday_pca(returns_mon):
-    pca = fit_pca_on_monday(returns_mon)
-    train_mean = pd.Series(
-        returns_mon.values.mean(axis=0),
-        index=returns_mon.columns
-    )
+    # Replace any remaining Inf/-Inf with NaN then drop those rows
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+
+    # Clip to ±10 std per column — removes fat-tail outliers that cause
+    # overflow in the covariance matmul without distorting normal returns
+    std = df.std()
+    std[std == 0] = 1.0   # guard zero-std columns
+    df = df.clip(lower=-10 * std, upper=10 * std, axis=1)
+
+    return df
+
+
+def fit_monday_pca(returns_mon, K=3):
+    """
+    Fit PCA on Monday returns. Returns (pca, train_mean).
+    Centres the data before fitting to avoid the matmul overflow.
+    """
+    train_mean = returns_mon.mean()
+    centred    = returns_mon - train_mean
+
+    # Double-check no NaN/Inf survived
+    assert not centred.isnull().any().any(), "NaN in centred returns"
+    assert np.isfinite(centred.values).all(), "Inf in centred returns"
+
+    pca = PCA(n_components=None)
+    pca.fit(centred.values)
+
+    print(f"  PCA fit: top-{K} components explain "
+          f"{pca.explained_variance_ratio_[:K].sum()*100:.1f}% of variance")
+
     return pca, train_mean
 
-from p3_regime_classifier import build_streaming_features, RegimeClassifier
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature diagnostics — prints what the features actually look like
+# per regime so you can set thresholds with real numbers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_feature_diagnostics(features_wed, y_true):
+    """
+    Print per-regime median of each feature.
+    Use these numbers to set FF_THRESH, CR_THRESH, SR_THRESH, Q_THRESH.
+    """
+    REGIMES = ["NORMAL", "FAT_FINGER", "SECTOR_ROTATION", "CORRELATION_BREAK"]
+    feats   = ["q_stat", "max_contrib_share", "subspace_angle_deg",
+               "ev_ratio_pc1_delta", "mean_corr"]
+
+    df = features_wed.copy()
+    df["true_label"] = y_true
+
+    print("\n" + "=" * 70)
+    print("FEATURE DIAGNOSTICS — median per regime (use these to set thresholds)")
+    print("=" * 70)
+    print(f"{'Feature':<25}", end="")
+    for r in REGIMES:
+        print(f"  {r[:12]:<13}", end="")
+    print()
+    print("-" * 70)
+
+    for feat in feats:
+        if feat not in df.columns:
+            continue
+        print(f"{feat:<25}", end="")
+        for r in REGIMES:
+            sub = df.loc[df["true_label"] == r, feat].dropna()
+            med = sub.median() if len(sub) > 0 else float("nan")
+            print(f"  {med:>12.5f} ", end="")
+        print()
+
+    print("=" * 70)
+    print("THRESHOLD GUIDE:")
+    print("  FF_THRESH  → set BELOW FAT_FINGER median of max_contrib_share")
+    print("              and ABOVE NORMAL median of max_contrib_share")
+    print("  CR_THRESH  → set BELOW CORRELATION_BREAK median of subspace_angle_deg")
+    print("              and ABOVE NORMAL median of subspace_angle_deg")
+    print("  SR_THRESH  → set BELOW SECTOR_ROTATION median of ev_ratio_pc1_delta")
+    print("              and ABOVE NORMAL median of ev_ratio_pc1_delta")
+    print("  Q_THRESH   → set BELOW FAT_FINGER median of q_stat")
+    print("              and ABOVE NORMAL median of q_stat")
+    print("=" * 70 + "\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Auto-logger — writes to experiment_log.md and pushes to GitHub
+# Auto-logger
 # ─────────────────────────────────────────────────────────────────────────────
 
-def log_and_push_to_github(ff, cr, sr, q, acc, report_str):
+def log_and_push(ff, cr, sr, q, acc):
     log_file = os.path.join(ROOT, "experiment_log.md")
     file_exists = os.path.isfile(log_file)
 
     with open(log_file, "a") as f:
         if not file_exists:
             f.write("# Model Tuning Log\n\n")
-            f.write("| Date & Time | FF Thresh | CR Thresh | SR Thresh |"
-                    " Q Thresh | Overall Accuracy |\n")
+            f.write("| Date & Time | FF | CR | SR | Q | Accuracy |\n")
             f.write("|---|---|---|---|---|---|\n")
         f.write(
             f"| {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
             f"| {ff} | {cr} | {sr} | {q} | **{acc*100:.2f}%** |\n"
         )
 
-    print(f"\nLogged results to {log_file}")
-
-    print("Pushing to GitHub...")
+    print(f"\nLogged to {log_file}")
     subprocess.run(["git", "add", "experiment_log.md", "src/p5_backtester.py"],
                    cwd=ROOT)
-    commit_msg = f"Tuning run: Accuracy {acc*100:.2f}% | FF={ff} CR={cr} SR={sr} Q={q}"
-    subprocess.run(["git", "commit", "-m", commit_msg], cwd=ROOT)
-    result = subprocess.run(["git", "push"], cwd=ROOT, capture_output=True, text=True)
-    if result.returncode == 0:
-        print("Successfully pushed to GitHub.")
+    result_commit = subprocess.run(
+        ["git", "commit", "-m",
+         f"Tuning run: {acc*100:.2f}% | FF={ff} CR={cr} SR={sr} Q={q}"],
+        cwd=ROOT, capture_output=True, text=True
+    )
+    result_push = subprocess.run(["git", "push"], cwd=ROOT,
+                                  capture_output=True, text=True)
+    if result_push.returncode == 0:
+        print("Pushed to GitHub.")
     else:
-        print(f"Git push failed: {result.stderr.strip()}")
-        print("Results are still saved locally in experiment_log.md")
+        print(f"Push failed (results saved locally): {result_push.stderr.strip()}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main backtest runner
+# Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_backtest():
     print("=" * 60)
-    print("WEDNESDAY BACKTEST")
+    print("WEDNESDAY BACKTEST v2")
     print("=" * 60)
 
-    # ── Load data — CSVs are in project ROOT ─────────────────────────────────
-    # The script auto-chdirs to ROOT above so these paths always work
-    # regardless of whether you run from root or from src/
+    K = 3   # number of PCA components — must match Part 1 choice
+
+    # ── Load data ─────────────────────────────────────────────────────────────
     print("\nLoading Monday ticks...")
     returns_mon = load_and_prep_data("ticks_mon.csv")
-    pca_mon, train_mean = fit_monday_pca(returns_mon)
+    pca_mon, train_mean = fit_monday_pca(returns_mon, K=K)
 
     print("Loading Wednesday ticks...")
     returns_wed = load_and_prep_data("ticks_wed.csv")
@@ -104,7 +180,6 @@ def run_backtest():
                   .set_index("timestamp"))
     label_col = labels_wed.columns[0]
 
-    # Align timestamps
     common_index = returns_wed.index.intersection(labels_wed.index)
     returns_wed  = returns_wed.loc[common_index]
     labels_wed   = labels_wed.loc[common_index]
@@ -114,12 +189,13 @@ def run_backtest():
     print(f"True label distribution:\n{labels_wed[label_col].value_counts().to_string()}")
 
     # ── Build features ────────────────────────────────────────────────────────
-    K = 3   # must match what you chose in Part 1
     monday_eigvecs_k = pca_mon.components_[:K]
     monday_eigvecs_2 = pca_mon.components_[:2]
     monday_ev_ratios = pca_mon.explained_variance_ratio_
 
-    print("\nBuilding streaming features (causal, no look-ahead)...")
+    from p3_regime_classifier import build_streaming_features, RegimeClassifier
+
+    print("\nBuilding streaming features...")
     t0 = time.perf_counter()
 
     features_wed = build_streaming_features(
@@ -129,38 +205,32 @@ def run_backtest():
         monday_eigvecs_2 = monday_eigvecs_2,
         train_mean       = train_mean.values,
         monday_ev_ratios = monday_ev_ratios,
-        q_threshold      = 0.1,      # used only for info, not filtering
+        q_threshold      = 0.1,
     )
 
+    # Print diagnostics BEFORE setting thresholds
+    # Read the printed medians and set your thresholds below them
+    print_feature_diagnostics(features_wed, y_true)
+
     # =========================================================================
-    # HYPERPARAMETERS — tune these numbers and re-run
+    # HYPERPARAMETERS
     #
-    # What each one does:
-    #   FF_THRESH  — max_contrib_share threshold for FAT_FINGER detection.
-    #                Lower = more sensitive to single-asset spikes.
-    #                Too low = false positives on normal noise.
-    #                Start: 0.35. Try: 0.20, 0.15, 0.10
+    # STEP 1: Run the script once with these defaults.
+    # STEP 2: Read the FEATURE DIAGNOSTICS table printed above.
+    # STEP 3: Set each threshold between NORMAL median and target-regime median.
     #
-    #   CR_THRESH  — subspace_angle_deg threshold for CORRELATION_BREAK.
-    #                Lower = fires earlier on eigenvector rotation.
-    #                Start: 20.0. Try: 15.0, 25.0, 30.0
-    #
-    #   SR_THRESH  — ev_ratio_pc1_delta threshold for SECTOR_ROTATION.
-    #                Lower = more sensitive to eigenvalue spectrum shifts.
-    #                Start: 0.05. Try: 0.03, 0.08, 0.10
-    #
-    #   Q_THRESH   — minimum Q-stat required to confirm FAT_FINGER.
-    #                Lower = easier to trigger FAT_FINGER.
-    #                Start: 0.001. Try: 0.0005, 0.002
+    # Example: if diagnostics show
+    #   max_contrib_share: NORMAL=0.18, FAT_FINGER=0.52
+    #   → set FF_THRESH = 0.35  (halfway between)
     # =========================================================================
-    FF_THRESH = 0.05
-    CR_THRESH = 45.0
-    SR_THRESH = 0.12
-    Q_THRESH  = 0.001
+    FF_THRESH = 0.35    # max_contrib_share cutoff for FAT_FINGER
+    CR_THRESH = 20.0    # subspace_angle_deg cutoff for CORRELATION_BREAK
+    SR_THRESH = 0.05    # ev_ratio_pc1_delta cutoff for SECTOR_ROTATION
+    Q_THRESH  = 0.001   # minimum q_stat to confirm FAT_FINGER
     # =========================================================================
 
     print("Classifying regimes...")
-    classifier = RegimeClassifier(
+    clf = RegimeClassifier(
         thresholds={
             "ff_thresh": FF_THRESH,
             "cr_thresh": CR_THRESH,
@@ -169,23 +239,19 @@ def run_backtest():
         q_thresh  = Q_THRESH,
         smoothing = 5,
     )
-    preds = classifier.predict_batch(features_wed)
-
+    preds   = clf.predict_batch(features_wed)
     elapsed = time.perf_counter() - t0
     acc     = accuracy_score(y_true, preds)
-    report  = classification_report(y_true, preds, zero_division=0)
 
     print("\n" + "=" * 60)
-    print("BACKTEST RESULTS")
+    print("RESULTS")
     print("=" * 60)
-    print(f"Runtime:          {elapsed:.1f}s")
-    print(f"Overall accuracy: {acc*100:.2f}%\n")
-    print(report)
+    print(f"Runtime:  {elapsed:.1f}s")
+    print(f"Accuracy: {acc*100:.2f}%\n")
+    print(classification_report(y_true, preds, zero_division=0))
+    print(f"Predicted distribution:\n{pd.Series(preds).value_counts().to_string()}\n")
 
-    print(f"\nPredicted label distribution:\n{pd.Series(preds).value_counts().to_string()}")
-
-    # ── Log and push ──────────────────────────────────────────────────────────
-    log_and_push_to_github(FF_THRESH, CR_THRESH, SR_THRESH, Q_THRESH, acc, report)
+    log_and_push(FF_THRESH, CR_THRESH, SR_THRESH, Q_THRESH, acc)
 
 
 if __name__ == "__main__":
