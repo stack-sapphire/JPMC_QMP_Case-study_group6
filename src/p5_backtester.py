@@ -3,8 +3,7 @@ p5_backtester.py  — v5
 ========================
 Fix from v4:
   Timestamp formatting crash in generate_thursday_submission().
-  The index already contains timezone-aware timestamps — no need to
-  call pd.to_datetime() again. Just format directly with strftime.
+  Fixed using format='mixed' to handle milliseconds gracefully.
 """
 
 import sys
@@ -191,13 +190,8 @@ def generate_thursday_submission(pca_mon, train_mean, K,
     )
     preds_thu = preds_thu.fillna("NORMAL")
 
-    # ── FIX: index is already a DatetimeTZDtype — just call strftime directly ──
-    # Do NOT call pd.to_datetime() on it again (causes format mismatch crash).
     idx = features_thu.index
-    if hasattr(idx, "strftime"):
-        ts_strings = idx.strftime("%Y-%m-%dT%H:%M:%S%z")
-    else:
-        ts_strings = pd.to_datetime(idx, utc=True).strftime("%Y-%m-%dT%H:%M:%S%z")
+    ts_strings = pd.to_datetime(idx, format='mixed', utc=True).strftime("%Y-%m-%dT%H:%M:%S%z")
 
     submission = pd.DataFrame({
         "timestamp":        ts_strings,
