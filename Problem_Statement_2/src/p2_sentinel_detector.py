@@ -332,13 +332,13 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
     contribs  = per_asset_contributions(tue_centred, eigvecs_k)  # (T, 12)
 
     # Find peak-Q tick inside 13:00–14:00 window
-    idx_1300 = returns_tue.index.searchsorted(
-        returns_tue.index[returns_tue.index.indexer_at_time("13:00:00")][0]
-    )
-    idx_1400 = returns_tue.index.searchsorted(
-        returns_tue.index[returns_tue.index.indexer_at_time("14:00:00")][-1],
-        side="right"
-    )
+    locs = returns_tue.index.indexer_between_time("13:00", "14:00")
+    if len(locs) > 0:
+        idx_1300 = locs[0]
+        idx_1400 = locs[-1] + 1
+    else:
+        idx_1300 = 0
+        idx_1400 = len(returns_tue)
     peak_idx = idx_1300 + int(np.argmax(q_tue[idx_1300:idx_1400]))
     print(f"\nPeak-Q tick in event window: index {peak_idx}, "
           f"time {returns_tue.index[peak_idx]}")

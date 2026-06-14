@@ -311,7 +311,7 @@ def run_live_demo(pipe: PhantomLatticePipeline,
     Must complete in < 60 seconds wall-clock.
     """
     t0            = returns_thu.index.min()
-    first_hour    = returns_thu.loc[returns_thu.index < t0 + pd.Timedelta("1H")]
+    first_hour    = returns_thu.loc[returns_thu.index < t0 + pd.Timedelta("1h")]
     chunks        = np.array_split(first_hour.values,
                                    max(1, len(first_hour) // chunk_size))
 
