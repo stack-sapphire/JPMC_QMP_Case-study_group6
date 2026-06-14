@@ -1,2 +1,4 @@
 "QMP-Case study (PS+data)/*.csv"
 .DS_Store
+.venv/
+.vscode/
