@@ -1,21 +1,16 @@
 """
-p1_blind_cartographer.py
-========================
-PS2 · Part 1 — The Blind Cartographer (10 marks)
+PS2-Part 1: The Blind Cartographer 
 
-Solves:
-  (a) Load Monday ticks, pivot, fit PCA, scree plot,
-      Kaiser / broken-stick / parallel-analysis criteria → choose K
-  (b) Loadings scatter in (PC1, PC2) plane, polygon geometry,
-      rotation-ambiguity demonstration
-  (c) Information-leakage quantification: ev_test_clean vs ev_test_leaky
-  (d) Algebraic proof that equal-weight portfolio has zero PC1/PC2 exposure
-      under 12-gon population assumption
-  (e) Written observations (markdown cells in notebook)
+This module handles the initial exploratory PCA on Monday's tick data.
 
-Imports used by the notebook and by the Bonus pipeline.
+Core tasks covered:
+- (a) Data loading, PCA fitting, and K-selection (Kaiser / broken-stick / parallel)
+- (b) Analyzing the 12-gon polygon geometry and rotation ambiguity in the (PC1, PC2) plane
+- (c) Quantifying information leakage (ev_test_clean vs ev_test_leaky)
+- (d) Proving the equal-weight portfolio neutrality under the 12-gon assumption
+- (e) Supporting logic for notebook observations
 """
-
+#imports used by the notebook and the bonus pipeline 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -24,17 +19,15 @@ from sklearn.decomposition import PCA
 
 np.random.seed(0)   # mandatory for parallel-analysis resampling
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # (a) Data loading and PCA fit
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def load_and_pivot(csv_path: str, reference_columns=None) -> pd.DataFrame:
     """
-    Load a ticks CSV and pivot into a (T × 12) returns matrix.
-    Drops any timestamp where ANY asset has a NaN mid_return.
+    -Load a ticks CSV and pivot into a (T x 12) returns matrix.
+    Drops any timestamp where any  asset has a NaN mid_return.
     If reference_columns is given, reindex to that column order
-    (critical: Tuesday/Wed/Thu must match Monday's asset order for
+    -(Critical: Tuesday/Wed/Thu must match Monday's asset order for
     the eigenvectors fitted on Monday to align correctly).
     """
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
@@ -57,47 +50,46 @@ def fit_pca_on_monday(returns_mon: pd.DataFrame) -> PCA:
     pca.fit(returns_mon.values)
     return pca
 
+#(a) Component-count selection criteria
 
-# ─────────────────────────────────────────────────────────────────────────────
-# (a) Component-count selection criteria
-# ─────────────────────────────────────────────────────────────────────────────
 
 def select_n_components(eigenvalues: np.ndarray,
                         returns_matrix: np.ndarray,
                         n_resamples: int = 500,
                         seed: int = 0) -> dict:
     """
-    Returns a dict with three criteria verdicts.
+Returns a dictionary containing the recommended number of components (K) 
+based on three standard selection criteria:
 
-    Kaiser criterion (adapted for covariance PCA):
-        Retain if eigenvalue > mean eigenvalue.
-        (Standard Kaiser uses eigenvalue > 1 for *correlation* PCA;
-        for covariance PCA the mean eigenvalue is the correct threshold.)
+1. Kaiser Criterion (Covariance-adapted): 
+   Retains components where the eigenvalue > mean eigenvalue. 
+   (Note: Standard Kaiser uses > 1 for correlation PCA, but the mean 
+   eigenvalue is the correct threshold for covariance PCA).
 
-    Broken-stick:
-        Retain component j if λ_j > λ̄ · Σ_{i=j}^{12} (1/i)
-        where λ̄ = mean eigenvalue.
+2. Broken-Stick: 
+   Retains component j if λ_j > λ̄ * Σ_{i=j}^{12} (1/i), 
+   where λ̄ is the mean eigenvalue.
 
-    Parallel analysis (Horn's method):
-        500 resamples: shuffle each column independently to break
-        cross-asset correlation while preserving marginals.
-        Retain if λ_j > 95th percentile of resampled λ_j.
-    """
+3. Parallel Analysis (Horn's Method): 
+   Runs 500 resamples, shuffling each column independently to destroy 
+   cross-asset correlations while preserving marginals. Retains a 
+   component if its eigenvalue > the 95th percentile of the noise.
+"""
     rng = np.random.default_rng(seed)
     n, p = returns_matrix.shape
     mean_ev = eigenvalues.mean()
 
-    # ── Kaiser ──
+    #  Kaiser 
     kaiser_k = int(np.sum(eigenvalues > mean_ev))
 
-    # ── Broken-stick ──
+    # Broken-stick 
     bs_thresholds = mean_ev * np.array([
         sum(1.0 / i for i in range(j, p + 1))
         for j in range(1, p + 1)
     ])
     broken_stick_k = int(np.sum(eigenvalues > bs_thresholds))
 
-    # ── Parallel analysis ──
+    # Parallel analysis 
     resample_evs = np.zeros((n_resamples, p))
     centred = returns_matrix - returns_matrix.mean(axis=0)
     for r in range(n_resamples):
@@ -118,7 +110,7 @@ def select_n_components(eigenvalues: np.ndarray,
 
 
 def plot_scree(eigenvalues: np.ndarray, verdicts: dict, title="Scree plot"):
-    """Scree plot annotated with each criterion's cutoff."""
+    #Scree plot annotated with each criterion's cutoff
     fig, ax = plt.subplots(figsize=(8, 4))
     k = len(eigenvalues)
     xs = np.arange(1, k + 1)
@@ -140,14 +132,12 @@ def plot_scree(eigenvalues: np.ndarray, verdicts: dict, title="Scree plot"):
     plt.show()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # (b) Loadings plot + rotation ambiguity
-# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_loadings_scatter(pca: PCA, asset_ids, title="PC1 vs PC2 loadings"):
-    """
-    Scatter the 12 assets in the (PC1, PC2) plane.
-    Expected geometry: vertices of a regular 12-gon (roots of unity).
+    """Plots the asset loadings in the (PC1, PC2) plane. 
+    If the underlying math holds, the assets should perfectly map to the vertices 
+    of a regular 12-gon, representing the 12th roots of unity.
     """
     loadings = pca.components_[:2].T    # (12, 2)
     fig, ax = plt.subplots(figsize=(5, 5))
@@ -168,10 +158,9 @@ def plot_loadings_scatter(pca: PCA, asset_ids, title="PC1 vs PC2 loadings"):
 
 def demonstrate_rotation_ambiguity(pca: PCA, returns_mon: np.ndarray,
                                    angle_deg: float = 30.0):
-    """
-    (b) Rotate the top-2 loadings by `angle_deg` and show that:
-      - the per-axis variance decomposition changes (PC1 ≠ PC2 anymore)
-      - the JOINT variance (λ1 + λ2) is invariant
+    """(b) Rotate the top-2 loadings by `angle_deg` and show that:
+    - the per-axis variance decomposition changes (PC1 ≠ PC2 anymore)
+    - the joint  variance (λ1 + λ2) is invariant
     This is the rotation-ambiguity problem of unsupervised factor models.
     """
     theta = np.deg2rad(angle_deg)
@@ -214,9 +203,7 @@ def demonstrate_rotation_ambiguity(pca: PCA, returns_mon: np.ndarray,
     plt.show()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # (c) Information leakage quantification
-# ─────────────────────────────────────────────────────────────────────────────
 
 def projected_explained_variance(test_X: np.ndarray,
                                   eigenvectors_k: np.ndarray,
@@ -225,7 +212,6 @@ def projected_explained_variance(test_X: np.ndarray,
     EV ratio on test_X using only training-set statistics.
 
     ev = 1 - ||X_test - X̂_test||²_F / ||X_test||²_F
-
     where X_test is centred by train_mean (NOT test mean — that would
     be its own form of leakage), and X̂_test is its reconstruction
     from the top-K training eigenvectors.
@@ -243,22 +229,21 @@ def projected_explained_variance(test_X: np.ndarray,
 def quantify_leakage(returns_mon: pd.DataFrame,
                      returns_tue: pd.DataFrame,
                      K: int) -> dict:
-    """
-    Correct procedure: PCA on Monday only, centre Tuesday by Monday mean.
+    """Correct procedure: PCA on Monday only, centre Tuesday by Monday mean.
     Leaky procedure:   PCA on Mon+Tue combined, centre by combined mean.
     Returns gap = ev_test_leaky - ev_test_clean.
     """
     mon_vals = returns_mon.values
     tue_vals = returns_tue.values
 
-    # ── Correct ──
+    #Correct 
     pca_mon   = PCA().fit(mon_vals)
     train_mean = mon_vals.mean(axis=0)
     ev_clean  = projected_explained_variance(
         tue_vals, pca_mon.components_[:K], train_mean
     )
 
-    # ── Leaky ──
+    # Leaky 
     combined     = np.vstack([mon_vals, tue_vals])
     pca_combined = PCA().fit(combined)
     combined_mean = combined.mean(axis=0)
@@ -273,15 +258,12 @@ def quantify_leakage(returns_mon: pd.DataFrame,
     return {"ev_clean": ev_clean, "ev_leaky": ev_leaky, "gap": gap}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# (d) Structural neutrality proof (empirical verification)
-# ─────────────────────────────────────────────────────────────────────────────
 
+# (d) Structural neutrality proof (empirical verification)
 def verify_neutrality(pca: PCA, n_assets: int = 12):
     """
     Computes the equal-weight portfolio's loading on PC1 and PC2.
     Under the population 12-gon assumption these should be ~0.
-
     Algebraic proof (for the markdown cell):
         If the 12 assets sit at e^{i·2πk/12} for k=0…11 in the (PC1,PC2) plane,
         then the equal-weight loading is:
