@@ -288,15 +288,21 @@ def plot_contribution_bar(contrib_row: np.ndarray, asset_ids, title=""):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main run function — called from notebook Part 2 cell
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
                  pca_mon, K: int):
     """
-    Orchestrates all of Part 2.
-    pca_mon: fitted sklearn PCA object from Part 1.
-    Returns detector object (reused by Bonus pipeline) and thresholds dict.
+    Executes Part 2 end-to-end:
+      1. Computes Q and T² on Tuesday using Monday's PCA.
+      2. Computes thresholds.
+      3. Plots static PCA diagnostics.
+      4. Performs contribution analysis.
+      5. Runs streaming PCA shootout.
     """
+    # Enforce DatetimeIndex (fixes errors if indices are passed as strings)
+    returns_mon.index = pd.to_datetime(returns_mon.index, format="mixed", utc=True)
+    returns_tue.index = pd.to_datetime(returns_tue.index, format="mixed", utc=True)
+
+    print("--- Running Sentinel (Part 2) ---")
     train_mean  = returns_mon.values.mean(axis=0)
     eigvecs_k   = np.ascontiguousarray(pca_mon.components_[:K])   # (K,12)
     eigvals_k   = pca_mon.explained_variance_[:K]                  # (K,)
@@ -332,13 +338,10 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
     contribs  = per_asset_contributions(tue_centred, eigvecs_k)  # (T, 12)
 
     # Find peak-Q tick inside 13:00–14:00 window
-    locs = returns_tue.index.indexer_between_time("13:00", "14:00")
-    if len(locs) > 0:
-        idx_1300 = locs[0]
-        idx_1400 = locs[-1] + 1
-    else:
-        idx_1300 = 0
-        idx_1400 = len(returns_tue)
+    t1 = pd.to_datetime("2026-06-02 13:00:00+00:00")
+    t2 = pd.to_datetime("2026-06-02 14:00:00+00:00")
+    idx_1300 = returns_tue.index.searchsorted(t1)
+    idx_1400 = returns_tue.index.searchsorted(t2, side="right")
     peak_idx = idx_1300 + int(np.argmax(q_tue[idx_1300:idx_1400]))
     print(f"\nPeak-Q tick in event window: index {peak_idx}, "
           f"time {returns_tue.index[peak_idx]}")

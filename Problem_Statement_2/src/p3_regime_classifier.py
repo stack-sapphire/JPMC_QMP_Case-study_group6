@@ -479,8 +479,8 @@ def build_submission_csv(preds_thu: pd.Series, team_number: str,
     })
     submission["predicted_regime"] = submission["predicted_regime"].fillna("NORMAL")
     submission["timestamp"] = pd.to_datetime(
-        submission["timestamp"], format='ISO8601', utc=True
-    ).dt.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+        submission["timestamp"]
+    ).dt.strftime("%Y-%m-%dT%H:%M:%S%z")
 
     path = f"{output_dir}/Team_{team_number}_submission.csv"
     submission.to_csv(path, index=False)
