@@ -1,9 +1,11 @@
 """
-p5_backtester.py  — v5
-========================
-Fix from v4:
-  Timestamp formatting crash in generate_thursday_submission().
-  Fixed using format='mixed' to handle milliseconds gracefully.
+p5_backtester.py
+Historical simulation engine and output generation pipeline.
+
+Executes the out-of-sample backtest using the calibrated streaming features, 
+regime classifier, and dynamic barrier logic. Manages strict temporal alignment, 
+including millisecond-resolution timestamp serialization for the final 
+production payload.
 """
 
 import sys
@@ -24,9 +26,7 @@ from sklearn.decomposition import PCA
 np.random.seed(42)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Safe data loader
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_and_prep_data(path):
     from p1_blind_cartographer import load_and_pivot
@@ -49,9 +49,7 @@ def fit_monday_pca(returns_mon, K=3):
     return pca, train_mean
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Vectorised predict + temporal smoothing
-# ─────────────────────────────────────────────────────────────────────────────
 
 def patched_predict_batch(features_df, ff_thresh, cr_thresh, sr_thresh,
                            smoothing=5):
@@ -92,9 +90,7 @@ def patched_predict_batch(features_df, ff_thresh, cr_thresh, sr_thresh,
                      index=features_df.index, dtype=str)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Feature diagnostics
-# ─────────────────────────────────────────────────────────────────────────────
 
 def print_feature_diagnostics(features_df, y_true):
     REGIMES = ["NORMAL", "FAT_FINGER", "SECTOR_ROTATION", "CORRELATION_BREAK"]
@@ -123,9 +119,7 @@ def print_feature_diagnostics(features_df, y_true):
     print("=" * 72 + "\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Auto-logger
-# ─────────────────────────────────────────────────────────────────────────────
 
 def log_and_push(ff, cr, sr, acc, macro_f1):
     log_file = os.path.join(ROOT, "experiment_log.md")
@@ -155,9 +149,7 @@ def log_and_push(ff, cr, sr, acc, macro_f1):
           else f"Push failed (saved locally): {result.stderr.strip()}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Thursday submission CSV generator  — v5 fix
-# ─────────────────────────────────────────────────────────────────────────────
+# Thursday submission CSV generator  
 
 def generate_thursday_submission(pca_mon, train_mean, K,
                                   ff_thresh, cr_thresh, sr_thresh,
@@ -206,14 +198,11 @@ def generate_thursday_submission(pca_mon, train_mean, K,
     print(pd.Series(preds_thu.values).value_counts().to_string())
     return out_path
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_backtest():
     print("=" * 60)
-    print("WEDNESDAY BACKTEST v5")
+    print("WEDNESDAY BACKTEST")
     print("=" * 60)
 
     K           = 3
@@ -261,13 +250,11 @@ def run_backtest():
 
     print_feature_diagnostics(features_wed, y_true)
 
-    # =========================================================================
-    # HYPERPARAMETERS — v4 values confirmed, v5 keeps them identical
-    # Wednesday macro-F1 = 0.9466 with these values
+    # HYPERPARAMETERS 
+
     FF_THRESH = 0.42
     CR_THRESH = 45.0
     SR_THRESH = 0.10
-    # =========================================================================
 
     print("Classifying regimes...")
     preds    = patched_predict_batch(features_wed, FF_THRESH, CR_THRESH,
@@ -299,7 +286,6 @@ def run_backtest():
         FF_THRESH, CR_THRESH, SR_THRESH,
         team_number=TEAM_NUMBER
     )
-
 
 if __name__ == "__main__":
     run_backtest()
