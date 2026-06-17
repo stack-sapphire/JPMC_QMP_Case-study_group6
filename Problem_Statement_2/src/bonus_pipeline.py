@@ -1,25 +1,21 @@
 """
 bonus_pipeline.py
-=================
-PS2 · Bonus — The Full Stack (+5 marks, optional)
 
-Wires Parts 1–4 into a single end-to-end pipeline class.
+Full end-to-end integration of the Phantom Lattice architecture. 
 
-PhantomLatticePipeline.step(r):
-  Takes one 12-vector (post-pivot, NaN-dropped row aligned with Monday
-  column order). Processes it through all four components in sequence:
-    1. StreamingPCADetector  → Q and T² (Part 2d)
-    2. RollingCovarianceEngine + RegimeClassifier → regime label (Part 3)
-    3. Inventory simulator with dynamic barriers (Part 4d)
-  Emits structured telemetry events.
+The main engine is `PhantomLatticePipeline.step(r)`, which takes a single 
+aligned tick (12-asset return vector) and runs it through the entire stack:
+1. PCA Detector (extracts Q and T^2 stats)
+2. Regime Classifier (Rolling Covariance updates)
+3. Inventory Simulator (checks against dynamic barriers)
 
-Telemetry events:
-  ALERT         — rising edge only (first tick Q or T² crosses threshold)
-  REGIME_CHANGE — emitted only when the label changes from previous tick
-  ABSORBED      — emitted once when inventory hits a barrier
-  SUMMARY       — emitted at end of run: inventory peak, round-trips, verdict
+It emits clean telemetry during the stream:
+- ALERT: Rising edges only for threshold breaches.
+- REGIME_CHANGE: Only logs when the market state physically transitions.
+- ABSORBED: Fires when inventory hits a barrier.
+- SUMMARY: Final aggregate stats at the end of the run.
 
-Live demo cell at the bottom streams Thursday's first 60 minutes.
+See the bottom cell for a live 60-minute Thursday simulation.
 """
 
 import gc
@@ -39,23 +35,20 @@ from p4_model_shootout import fixed_barrier_fn, anomaly_driven_barrier_fn
 
 class PhantomLatticePipeline:
     """
-    End-to-end live trading risk system.
-    Processes one 12-vector tick at a time via step().
+End-to-end live trading risk system. 
+Processes streaming market data one 12-asset tick at a time via `step()`.
 
-    Constructor arguments:
-      calibration_returns : (T_mon, 12) numpy array — Monday returns matrix
-      K                   : number of PCA components (chosen in Part 1)
-      q_threshold         : empirical 99th-pctile Q from Monday (Part 2b)
-      t2_threshold        : empirical 99th-pctile T² from Monday (Part 2b)
-      clf_thresholds      : dict of regime thresholds from Part 3
-      train_mean          : (12,) Monday column means
-      monday_eigvecs_2    : (2, 12) top-2 Monday eigenvectors for angle feature
-      monday_ev_ratios    : (2,) reference eigenvalue ratios from Monday
-      U, L                : default barrier width (40 each)
-      U_tight             : tightened barrier width during alert (20)
-      target_round_trips  : T from Part 4 (10)
-      window              : rolling covariance window for regime features (100)
-    """
+Args:
+    calibration_returns: Monday's (T, 12) returns matrix for baseline state.
+    K: Selected number of PCA components.
+    q_threshold, t2_threshold: 99th percentile alert limits from Monday.
+    clf_thresholds: Dict of regime thresholds (from Part 3).
+    train_mean, monday_eigvecs_2, monday_ev_ratios: Monday baseline stats.
+    U, L: Standard barrier bounds (default: 40).
+    U_tight: Restrictive barrier used during alerts (default: 20).
+    target_round_trips: Required T value from Part 4 (default: 10).
+    window: Lookback size for rolling covariance features (default: 100).
+"""
 
     def __init__(self,
                  calibration_returns: np.ndarray,
@@ -85,20 +78,20 @@ class PhantomLatticePipeline:
         self.window         = window
         self.n_assets       = calibration_returns.shape[1]
 
-        # ── Component 1: fit PCA on Monday calibration data ─────────────────
+        #  Component 1: fit PCA on Monday calibration data 
         pca_mon = fit_pca_on_monday(
             pd.DataFrame(calibration_returns)
         )
         self.eigvecs_k = np.ascontiguousarray(pca_mon.components_[:K])
         self.eigvals_k = pca_mon.explained_variance_[:K]
 
-        # ── Component 2: streaming anomaly detector ──────────────────────────
+        #  Component 2: streaming anomaly detector 
         self.detector = StreamingPCADetector(
             n_assets=self.n_assets, K=K, lam=0.01, warmup=500, cadence=10
         )
         self.detector.warmup_jit()
 
-        # ── Component 3: rolling covariance + regime classifier ──────────────
+        # Component 3: rolling covariance + regime classifier 
         self.cov_engine = RollingCovarianceEngine(self.n_assets, window)
         I_minus_P = np.eye(self.n_assets) - self.eigvecs_k.T @ self.eigvecs_k
         self.I_minus_P = I_minus_P
@@ -112,14 +105,14 @@ class PhantomLatticePipeline:
         self._regime_buffer = ["NORMAL"] * 5
         self._current_regime = "NORMAL"
 
-        # ── Component 4: inventory state ─────────────────────────────────────
+        # Component 4: inventory state 
         self.inventory    = 0
         self.round_trips  = 0
         self.absorbed     = False
         self.max_inv      = 0
         self.max_inv_tick = 0
 
-        # ── Telemetry ────────────────────────────────────────────────────────
+        #  Telemetry 
         self.telemetry    = []
         self.tick_count   = 0
 
@@ -131,29 +124,32 @@ class PhantomLatticePipeline:
         gc.disable()
         gc.freeze()
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Core step — one 12-vector tick
-    # ─────────────────────────────────────────────────────────────────────────
+    # Core step  one 12-vector tick
 
     def step(self, r: np.ndarray) -> dict:
         """
-        r: 1-D float64 numpy array of shape (12,).
-           Caller is responsible for pivoting, NaN-drop, and ensuring
-           column alignment with Monday's calibration data.
+Process a single tick.
 
-        Returns a snapshot dict with current state.
-        If absorbed, all subsequent calls return the frozen snapshot.
-        """
+Args:
+    r (np.array): A 12-element array of the current returns. 
+                  Make sure this is already pivoted, cleaned (no NaNs), 
+                  and aligned exactly with Monday's column order.
+
+Returns:
+    dict: A snapshot of the current pipeline state. Note: If the system 
+          hits a barrier (absorbed), it freezes and just returns the 
+          terminal state for all future ticks.
+"""
         if self.absorbed:
             return self._frozen_snapshot()
 
         t = self.tick_count
         r = np.asarray(r, dtype=np.float64)
 
-        # ── 1. Centre by Monday mean ─────────────────────────────────────────
+        # 1. Centre by Monday mean 
         r_c = r - self.train_mean
 
-        # ── 2. Streaming anomaly detector ────────────────────────────────────
+        # 2. Streaming anomaly detector 
         q, t2 = self.detector.update(r_c)
 
         # Rising-edge alert logic (only fire on the first crossing)
@@ -164,9 +160,9 @@ class PhantomLatticePipeline:
                             t2=round(float(t2), 6))
         self._in_alert = alert_now
 
-        # ── 3. Regime classification ─────────────────────────────────────────
+        # 3. Regime classification 
         # Compute features inline (same logic as build_streaming_features
-        # but for a single row — no DataFrame, no Pandas)
+        # but for a single row -no DataFrame, no Pandas)
         feat_row = self._compute_features(r, r_c, t)
         regime   = self.clf.predict_single(feat_row)
 
@@ -181,7 +177,7 @@ class PhantomLatticePipeline:
             self._prev_regime = smoothed
         self._current_regime = smoothed
 
-        # ── 4. Inventory / kill-switch ───────────────────────────────────────
+        #  4. Inventory / kill-switch 
         # Canonical fill construction: sign of net imbalance across 12 assets
         fill = int(np.sign(np.sign(r).sum()))
 
@@ -220,9 +216,7 @@ class PhantomLatticePipeline:
             "absorbed":     self.absorbed,
         }
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Feature computation for a single row (no Pandas, no DataFrames)
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _compute_features(self, r: np.ndarray,
                            r_c: np.ndarray,
@@ -236,7 +230,7 @@ class PhantomLatticePipeline:
 
         cov = self.cov_engine.push(r)
         if cov is None:
-            return feat   # warmup — NORMAL default in predict_single
+            return feat   
 
         total_var = max(np.trace(cov), 1e-15)
         vals = np.linalg.eigvalsh(cov)[::-1]
@@ -263,10 +257,8 @@ class PhantomLatticePipeline:
         feat[:] = [ev1, ev2, mean_corr, q_t, angle, max_share, ev1_delta]
         return feat
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Telemetry
-    # ─────────────────────────────────────────────────────────────────────────
-
+    
     def _log_event(self, event_type: str, **kwargs):
         self.telemetry.append({"event": event_type, **kwargs})
 
@@ -298,9 +290,7 @@ class PhantomLatticePipeline:
         gc.enable()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Live demo runner — called from the ### LIVE DEMO ### notebook cell
-# ─────────────────────────────────────────────────────────────────────────────
+# Live demo runner — called from the  LIVE DEMO  notebook cell
 
 def run_live_demo(pipe: PhantomLatticePipeline,
                   returns_thu: pd.DataFrame,
