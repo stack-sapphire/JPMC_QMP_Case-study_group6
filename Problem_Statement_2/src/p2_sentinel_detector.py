@@ -1,7 +1,5 @@
 """
 p2_sentinel.py
-==============
-PS2 · Part 2 — The Sentinel (10 marks)
 
 Solves:
   (a) Q-statistic and Hotelling T² on Tuesday tick stream — centred
@@ -46,7 +44,7 @@ try:
     _NUMBA = True
 except ImportError:
     _NUMBA = False
-    def njit(*args, **kwargs):          # transparent no-op shim
+    def njit(*args, **kwargs):  # transparent no-op shim
         def decorator(fn):
             return fn
         return decorator
@@ -54,12 +52,12 @@ except ImportError:
 np.random.seed(42)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Numba-compiled hot-path kernel
-# fastmath  — fused multiply-add, safe here (no error amplification chain)
-# nogil     — releases Python GIL so the loop can run on a free OS thread
-# cache     — compiled binary persisted to disk; no re-JIT on notebook restart
-# ─────────────────────────────────────────────────────────────────────────────
+# fastmath — fused multiply-add, safe here (no error amplification chain)
+# nogil — releases Python GIL so the loop can run on a free OS thread
+# cache — compiled binary persisted to disk; no re-JIT on notebook restart
+
 
 @njit(fastmath=True, nogil=True, cache=True)
 def _hot_tick(r, Sigma, I_minus_P, V, inv_lambda, lam):
@@ -82,9 +80,8 @@ def _hot_tick(r, Sigma, I_minus_P, V, inv_lambda, lam):
     return q, t2
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # StreamingPCADetector
-# ─────────────────────────────────────────────────────────────────────────────
 
 class StreamingPCADetector:
     """
@@ -112,7 +109,6 @@ class StreamingPCADetector:
         self.n       = n_assets
         self.t       = 0
         self._ticks_since_eigh = 0
-
         # All state matrices: C-contiguous float64 — fits in L1 cache on
         # a modern chip (5 × 12×12 × 8 bytes ≈ 5,760 bytes total).
         self.Sigma      = np.zeros((n_assets, n_assets), dtype=np.float64)
@@ -121,13 +117,13 @@ class StreamingPCADetector:
         self.P_proj     = np.zeros((n_assets, n_assets), dtype=np.float64)
         self.I_minus_P  = np.eye(n_assets,               dtype=np.float64)
 
-        # Output arrays — preallocated for a full day's ticks (generous)
+        # Output arrays-preallocated for a full day's ticks (generous)
         _MAX = 50_000
         self.q_out          = np.full(_MAX, np.nan, dtype=np.float64)
         self.t2_out         = np.full(_MAX, np.nan, dtype=np.float64)
         self.latencies_ns   = np.zeros(_MAX,         dtype=np.int64)
 
-    # ── Eigenvector refresh (expensive, cadence-gated) ──────────────────────
+    #Eigenvector refresh (expensive, cadence-gated) 
     def _update_eigenvectors(self):
         """
         Symmetrise Sigma before eigh to prevent floating-point drift
@@ -137,15 +133,15 @@ class StreamingPCADetector:
         Returns eigenvalues in descending order; keeps top-K.
         """
         Sigma_sym = 0.5 * (self.Sigma + self.Sigma.T)
-        vals, vecs = np.linalg.eigh(Sigma_sym)       # ascending order
-        idx = np.argsort(vals)[::-1][:self.K]        # descending, top-K
+        vals, vecs = np.linalg.eigh(Sigma_sym) # ascending order
+        idx = np.argsort(vals)[::-1][:self.K]  # descending, top-K
         self.V[:]          = np.ascontiguousarray(vecs[:, idx].T)  # (K,n)
         self.inv_lambda[:] = 1.0 / np.maximum(vals[idx], 1e-12)   # guard 0
-        # Precompute complement projector — rebuilt only here, reused every tick
+        # Precompute complement projector-rebuilt only here, reused every tick
         self.P_proj[:]    = self.V.T @ self.V
         self.I_minus_P[:] = np.eye(self.n) - self.P_proj
 
-    # ── JIT warmup — call ONCE before the real stream ───────────────────────
+    #  JIT warmup-call ONCE before the real stream 
     def warmup_jit(self):
         """
         Trigger Numba compilation on a dummy tick.
@@ -157,7 +153,7 @@ class StreamingPCADetector:
                   self.Sigma.copy(), self.I_minus_P.copy(),
                   self.V.copy(), self.inv_lambda.copy(), self.lam)
 
-    # ── Single-tick update ───────────────────────────────────────────────────
+    #  Single tick update 
     def update(self, r: np.ndarray):
         """
         r: 1-D float64 C-contiguous numpy array of shape (n_assets,).
@@ -167,7 +163,7 @@ class StreamingPCADetector:
         """
         t_start = time.perf_counter_ns()
 
-        # Cadence-gated eigendecomposition
+        # Cadence gated eigendecomposition
         if self.t >= self.warmup:
             self._ticks_since_eigh += 1
             if self._ticks_since_eigh >= self.cadence:
@@ -187,7 +183,7 @@ class StreamingPCADetector:
         self.t += 1
         return (q, t2) if self.t > self.warmup else (np.nan, np.nan)
 
-    # ── Latency report ───────────────────────────────────────────────────────
+    #  Latency report 
     def latency_report(self) -> dict:
         valid = self.latencies_ns[self.warmup : self.t]
         return {
@@ -198,9 +194,9 @@ class StreamingPCADetector:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Static (Monday-fitted) Q and T² — vectorised batch versions
-# ─────────────────────────────────────────────────────────────────────────────
+
+# Static (Monday-fitted) Q and T², vectorised batch versions
+
 
 def static_pca_q_score(X: np.ndarray, eigvecs_k: np.ndarray) -> np.ndarray:
     """
@@ -218,7 +214,7 @@ def static_pca_t2_score(X: np.ndarray, eigvecs_k: np.ndarray,
     """
     X:         (T, n) — already centred by training mean.
     eigvecs_k: (K, n) — top-K Monday eigenvectors.
-    eigvals_k: (K,)   — corresponding Monday eigenvalues.
+    eigvals_k: (K,)— corresponding Monday eigenvalues.
     Returns:   (T,) T²-statistics.
     """
     scores     = X @ eigvecs_k.T          # (T, K)
@@ -226,10 +222,8 @@ def static_pca_t2_score(X: np.ndarray, eigvecs_k: np.ndarray,
     return (scores ** 2 * inv_lambda).sum(axis=1)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Threshold functions (Part 2b)
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Threshold functions (Part 2b)
 def jackson_mudholkar_threshold(tail_eigenvalues: np.ndarray,
                                  alpha: float = 0.01) -> float:
     """
@@ -258,9 +252,9 @@ def t2_threshold_F(K: int, N_train: int, alpha: float = 0.01) -> float:
     return float(K * (N_train - 1) * (N_train + 1) / (N_train * (N_train - K)) * f_crit)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Contribution analysis (Part 2c)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def per_asset_contributions(X: np.ndarray,
                              eigvecs_k: np.ndarray) -> np.ndarray:
@@ -286,10 +280,8 @@ def plot_contribution_bar(contrib_row: np.ndarray, asset_ids, title=""):
     plt.show()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main run function — called from notebook Part 2 cell
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Main run function — called from notebook Part 2 cell
 def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
                  pca_mon, K: int):
     """
@@ -308,11 +300,11 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
         returns_tue.values - train_mean, dtype=np.float64
     )
 
-    # ── (a) Static Q and T² ──────────────────────────────────────────────────
+    # ── (a) Static Q and T² 
     q_tue  = static_pca_q_score(tue_centred, eigvecs_k)
     t2_tue = static_pca_t2_score(tue_centred, eigvecs_k, eigvals_k)
 
-    # ── (b) Thresholds ───────────────────────────────────────────────────────
+    # ── (b) Thresholds 
     mon_centred = returns_mon.values - train_mean
     q_mon  = static_pca_q_score(mon_centred, eigvecs_k)
     t2_mon = static_pca_t2_score(mon_centred, eigvecs_k, eigvals_k)
@@ -327,7 +319,7 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
     for k, v in thresh.items():
         print(f"  {k:8s} = {v:.6f}")
 
-    # ── (c) Contribution analysis ────────────────────────────────────────────
+    # ── (c) Contribution analysis 
     asset_ids = list(returns_tue.columns)
     contribs  = per_asset_contributions(tue_centred, eigvecs_k)  # (T, 12)
 
@@ -345,7 +337,7 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
     plot_contribution_bar(contribs[peak_idx], asset_ids,
                           title=f"Per-asset Q contributions at peak tick")
 
-    # ── (d) Streaming detector ───────────────────────────────────────────────
+    #(d) Streaming detector 
     detector = StreamingPCADetector(
         n_assets=12, K=K, lam=0.01, warmup=500, cadence=10
     )
@@ -360,7 +352,7 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
     gc.enable()
     print("\nStreaming detector latency:", detector.latency_report())
 
-    # ── (e) Model shootout ───────────────────────────────────────────────────
+    #(e) Model shootout 
     split      = int(0.8 * N_train)
     mon_train  = mon_centred[:split]
     mon_val    = mon_centred[split:]
@@ -423,9 +415,9 @@ def run_sentinel(returns_mon: pd.DataFrame, returns_tue: pd.DataFrame,
     return detector, thresh
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Helper utilities
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _detection_latency(scores: np.ndarray, threshold: float,
                         idx_1300: int) -> str:
