@@ -1,22 +1,22 @@
 """
 p4_kill_switch.py
 =================
-PS2 · Part 4 — The Kill-Switch (10 marks)
 
-Solves:
-  (a) Closed-form ruin probability for an asymmetric random walk with
-      two absorbing barriers (±U) and a round-trip target T.
-  (b) Sensitivity plot: ruin probability vs p ∈ [0.500, 0.530].
-      Find p* where ruin = 0.50.
-  (c) Re-estimate adverse-selection probability p on Tuesday and
-      Wednesday using the canonical fill-stream construction:
-        fill_direction = sign(Σᵢ sign(r_{t,i}))
-      Per-regime p̂ using Part 3 classifier output.
-  (d) Anomaly-driven dynamic barriers:
-        normal state   → barriers = ±U (=±40)
-        alert state    → barriers = ±U_tight (tunable, default 20)
-      Run empirical and synthetic-ensemble comparisons.
-  (e) Skew policy comparison: constant / linear / adaptive.
+Inventory risk management and dynamic barrier control.
+
+This module evaluates the ruin probability of an asymmetric random walk 
+under adverse selection and implements the live kill-switch logic.
+
+Core Components:
+- Ruin Probability: Closed-form evaluation of absorbing barriers (±U) 
+  and round-trip targets (T). Includes sensitivity profiling to find the 
+  critical adverse-selection threshold (p*).
+- Fill-Stream Analytics: Estimates empirical adverse-selection probability (p) 
+  per regime using the canonical fill-stream construction: 
+  fill_direction = sign(Σ_i sign(r_{t,i})).
+- Dynamic Barriers: Anomaly-driven inventory limits. Standard state operates 
+  at ±U (40), tightening to ±U_tight (20) during detected alerts.
+- Skew Policy Evaluation: Compares constant, linear, and adaptive skewing mechanisms.
 """
 
 import numpy as np
@@ -32,10 +32,7 @@ L_DEFAULT     = 40
 T_TRIPS       = 10     # target round-trips per session
 P_MON_EST     = 0.515
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # (a) Closed-form ruin probability
-# ─────────────────────────────────────────────────────────────────────────────
 
 def single_excursion_ruin(p: float, U: int, L: int) -> float:
     """
@@ -83,9 +80,7 @@ def ruin_probability(p: float, U: int = U_DEFAULT, L: int = L_DEFAULT,
     return float(1.0 - (1.0 - r) ** T)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # (b) Sensitivity
-# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_ruin_sensitivity(p_range=(0.500, 0.530), n_pts=61,
                            U=U_DEFAULT, L=L_DEFAULT, T=T_TRIPS):
@@ -115,10 +110,7 @@ def plot_ruin_sensitivity(p_range=(0.500, 0.530), n_pts=61,
     return p_star
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # (c) Estimate p from tick data
-# ─────────────────────────────────────────────────────────────────────────────
-
 def estimate_adverse_p(ticks_df: pd.DataFrame,
                         U: int = U_DEFAULT,
                         regime_series: Optional[pd.Series] = None) -> dict:
@@ -139,9 +131,9 @@ def estimate_adverse_p(ticks_df: pd.DataFrame,
     pivoted = (ticks_df
                .pivot(index="timestamp", columns="asset_id", values="mid_return")
                .dropna())
-    signs         = np.sign(pivoted.values)             # (T, 12)
-    net_imbalance = signs.sum(axis=1)                   # (T,)
-    fills         = np.sign(net_imbalance)              # +1, -1, 0
+    signs         = np.sign(pivoted.values)   # (T, 12)
+    net_imbalance = signs.sum(axis=1)        # (T,)
+    fills         = np.sign(net_imbalance)   # +1, -1, 0
     timestamps    = pivoted.index
 
     def _estimate_for_fills(fill_arr, inv_start=0):
@@ -152,7 +144,7 @@ def estimate_adverse_p(ticks_df: pd.DataFrame,
             if f == 0:
                 continue
             if inventory == 0:
-                # Neither barrier is nearer — skip per spec
+            # Neither barrier is nearer — skip per spec
                 inventory += int(f)
                 continue
             # Toward = fill pushes inventory away from 0 (toward barrier)
@@ -188,9 +180,7 @@ def estimate_adverse_p(ticks_df: pd.DataFrame,
         return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # (d) Inventory simulator
-# ─────────────────────────────────────────────────────────────────────────────
 
 def simulate_inventory(fill_stream: np.ndarray,
                         barrier_fn,
@@ -235,8 +225,7 @@ def anomaly_driven_barrier_fn(q_stream: np.ndarray,
                                U_tight: int = 20,
                                U_wide: int = U_DEFAULT,
                                L_wide: int = L_DEFAULT):
-    """
-    Returns tight barriers ±U_tight when Q > threshold,
+    """Returns tight barriers ±U_tight when Q > threshold,
     wide barriers ±U_wide otherwise.
     No hysteresis: reverts immediately when Q drops below threshold.
     During warmup (where Q is NaN) uses wide barriers.
@@ -290,9 +279,7 @@ def synthetic_ensemble(p_hat: float, q_stream: np.ndarray,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # (e) Skew policies
-# ─────────────────────────────────────────────────────────────────────────────
 
 def skew_policy_constant(inventory: int, base_p: float,
                           s: float, kappa: float = 0.05) -> float:
@@ -326,9 +313,10 @@ def compare_skew_policies(p_base: float, q_stream: np.ndarray,
                            s_range=(0, 5), n_pts=20,
                            U: int = U_DEFAULT, T: int = T_TRIPS,
                            N_seeds: int = 500):
+    
     """
     Plot ruin probability vs surrendered spread for all three policies.
-    """
+    """    
     spreads = np.linspace(*s_range, n_pts)
     q_norm  = q_stream / (q_threshold + 1e-15)
 
@@ -350,7 +338,7 @@ def compare_skew_policies(p_base: float, q_stream: np.ndarray,
                 p_eff_l = skew_policy_linear(   inv, p_base, s, kappa)
                 p_eff_a = skew_policy_adaptive(inv, qt, p_base, s, kappa)
                 # For simplicity evaluate ruin under each policy independently
-                break    # placeholder — full loop below
+                break  # placeholder —full loop below
             # Full per-policy ruin probability via closed form
             ruin_c += ruin_probability(
                 skew_policy_constant(1, p_base, s, kappa), U, U, T)
