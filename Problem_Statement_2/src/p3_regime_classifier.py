@@ -1,51 +1,27 @@
 """
-p3_regime_hunt.py
-=================
-PS2 · Part 3 — The Regime Hunt (10 marks)
+p3_regime_classifier.py
+=======================
 
-Solves:
-  (a) Streaming feature pipeline — STRICTLY CAUSAL.
-      The central fix: RollingCovarianceEngine uses a circular buffer
-      of past rows only. At tick t, the window is data[t-window : t]
-      (exclusive of t itself via the push-then-feature pattern).
-      No rolling().apply(), no shift(), no future rows ever enter
-      the covariance or any derived feature.
-  (b) RegimeClassifier — rule-based decision tree.
-      Two paths:
-        predict_batch()  — vectorised boolean masks, no Python loop,
-                           used for offline Thursday CSV generation.
-        predict_single() — plain if/else on a raw np.ndarray,
-                           used tick-by-tick in the Bonus pipeline.
-      Temporal smoothing: require 5 consecutive identical predictions
-      before committing (exploits the 30-tick minimum episode guarantee).
-  (c) Self-evaluation on Wednesday using released labels_wed.csv.
-  (d) Thursday submission CSV: Team_{N}_submission.csv.
-  (e) Post-mortem markdown cell (written in notebook).
+Causal feature engineering and rule-based regime classification.
 
-Look-ahead bug — what it was and how it is fixed here:
-  The previous build_streaming_features() rebuilt the covariance as
-  W = data[t-window : t+1], which included the current tick t in both
-  the eigenvector estimation AND the Q-statistic. The current tick's
-  regime fingerprint was therefore baked into its own features, giving
-  the classifier oracle-level information it would never have in live
-  trading. This produced 0.96 precision on CORRELATION_BREAK (impossible
-  in noisy data) and 0.00 F1 on FAT_FINGER (features never captured
-  single-asset micro-spikes because the spike averaged into the window).
+This module is strictly designed for live, tick-by-tick causality. 
+It replaces batch rolling windows (which are prone to look-ahead bias) 
+with a stateful `RollingCovarianceEngine`. 
 
-  Fix: RollingCovarianceEngine.push(r) updates the window buffer with r
-  and returns the covariance of the RESULTING window (which now contains
-  r as its newest member). The Q-statistic is then computed against the
-  Monday static model, not the rolling window — so tick t's Q is:
-    residual_t = (I - PᵀP) @ r_t
-  where PᵀP is the Monday projector. The rolling covariance is used ONLY
-  for eigenvalue ratios, mean correlation, and subspace angle — all of
-  which describe the *historical* window ending AT t (exclusive), i.e.
-  the state the market was in BEFORE tick t arrived.
+Core Mechanics:
+- Causal Features: At tick `t`, features are computed exclusively using 
+  the circular buffer ending at `t`. The Q-statistic and subspace projection 
+  are evaluated against the static Monday baseline, ensuring that a single-tick 
+  anomaly does not mask itself by polluting its own reference frame.
+- Classification (`RegimeClassifier`): A deterministic decision tree handling 
+  both vectorized batch execution (for backtesting) and single-tick evaluation 
+  (for the live pipeline).
+- Temporal Smoothing: Implements a 5-tick hysteresis buffer to filter transient 
+  noise, leveraging the assignment's 30-tick minimum episode guarantee.
 
-  The only tick included in its own feature window is via the running
-  covariance update: after push(r_t), the covariance includes r_t.
-  This is correct and causal: in live trading you HAVE r_t when you
-  compute features for t — you just cannot use r_{t+1}, r_{t+2}, etc.
+Outputs:
+Handles self-evaluation against Wednesday's known labels and generates 
+the final out-of-sample Thursday submission CSV.
 """
 
 import numpy as np
@@ -58,10 +34,8 @@ np.random.seed(42)
 REGIMES = ["NORMAL", "FAT_FINGER", "SECTOR_ROTATION", "CORRELATION_BREAK"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RollingCovarianceEngine — O(n²) incremental update, no window rebuild
-# ─────────────────────────────────────────────────────────────────────────────
 
+# RollingCovarianceEngine — O(n²) incremental update, no window rebuild
 class RollingCovarianceEngine:
     """
     Maintains a rolling unbiased covariance matrix over a fixed window
@@ -79,8 +53,8 @@ class RollingCovarianceEngine:
     recomputing from scratch.
 
     Running sums maintained:
-        sum_x  = Σ xᵢ           (for the mean)
-        sum_xx = Σ xᵢxᵢᵀ        (for the raw second moment)
+        sum_x  = Σ xᵢ   (for the mean)
+        sum_xx = Σ xᵢxᵢᵀ  (for the raw second moment)
     Centred covariance:
         Cov = (sum_xx - n·μμᵀ) / (n-1)   where μ = sum_x / n
     """
@@ -89,7 +63,7 @@ class RollingCovarianceEngine:
         self.n   = n_assets
         self.w   = window
         self.buf = np.zeros((window, n_assets), dtype=np.float64)
-        self.ptr = 0      # index of the OLDEST row (next to be evicted)
+        self.ptr = 0   # index of the OLDEST row (next to be evicted)
         self.count = 0
 
         self.sum_x  = np.zeros(n_assets,               dtype=np.float64)
@@ -97,18 +71,19 @@ class RollingCovarianceEngine:
 
     def push(self, r: np.ndarray):
         """
-        Insert one new row r. Returns the current unbiased covariance
-        matrix once the window is full, or None beforehand.
+Pushes a new tick (r) into the circular buffer.
 
-        CAUSALITY: after push(r_t), the window contains r_{t-window+1}
-        through r_t inclusive. Features computed from this covariance
-        describe the state of the market UP TO AND INCLUDING tick t.
-        No future tick is ever in the buffer.
-        """
+Returns the unbiased covariance matrix of the current window, 
+or None if the warmup period is still active.
+
+Note on Causality: The returned covariance represents the market 
+state exactly at tick t (inclusive of r_t, but strictly zero 
+knowledge of t+1).
+"""
         r = r.astype(np.float64, copy=False)
 
         if self.count < self.w:
-            # Window not yet full — accumulate without evicting
+            # Window not yet full, accumulate without evicting
             self.buf[self.ptr] = r
             self.sum_x  += r
             self.sum_xx += np.outer(r, r)
@@ -116,7 +91,7 @@ class RollingCovarianceEngine:
             self.count  += 1
             return None
         else:
-            # Evict oldest, insert newest
+            # Evict oldest,insert newest
             r_old        = self.buf[self.ptr]
             self.sum_x  += r - r_old
             self.sum_xx += np.outer(r, r) - np.outer(r_old, r_old)
@@ -131,29 +106,26 @@ class RollingCovarianceEngine:
         return 0.5 * (cov_raw + cov_raw.T)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fast subspace angle — avoids scipy for the 2×2 case
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Fast subspace angle, avoids scipy for the 2×2 case
 def fast_subspace_angle_deg(V1: np.ndarray, V2: np.ndarray) -> float:
     """
-    V1, V2: (K, n) — rows are orthonormal basis vectors.
-    Returns: mean principal angle in degrees.
+Calculates the mean principal angle (in degrees) between two subspaces.
 
-    For K=2 the inner product matrix M = V1 @ V2.T is 2×2.
-    Its singular values are cos(principal angles).
-    A 2×2 SVD is O(8 operations) — much faster than scipy's full routine.
-    Sign-invariant by construction (SVD ignores sign of eigenvectors).
-    """
+Inputs V1 and V2 are (K, n) matrices of orthonormal basis vectors.
+For K=2, the inner product matrix is just 2x2. Computing its SVD directly 
+takes O(8) operations, which completely avoids the massive overhead of 
+calling scipy's general routine during a live tick stream. 
+
+Bonus: It naturally handles PCA sign-ambiguity since the SVD ignores signs.
+"""
+    
     M  = V1 @ V2.T
     _, sv, _ = np.linalg.svd(M, full_matrices=False)
     angles_rad = np.arccos(np.clip(sv, -1.0, 1.0))
     return float(np.degrees(angles_rad).mean())
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Feature names (must match the order of the feature array)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 FEAT_NAMES = [
     "ev_ratio_pc1",        # mandatory: λ₁/Σλᵢ
@@ -165,7 +137,7 @@ FEAT_NAMES = [
     "ev_ratio_pc1_delta",  # extra: |ev_ratio_pc1 - monday_ev1|
 ]
 
-# Index lookup (used by predict_single for speed — no dict lookup per tick)
+# Index lookup (used by predict_single for speed , no dict lookup per tick)
 _I_EV1   = 0
 _I_EV2   = 1
 _I_CORR  = 2
@@ -175,10 +147,8 @@ _I_FF    = 5
 _I_EV1D  = 6
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# build_streaming_features — causal, incremental, no look-ahead
-# ─────────────────────────────────────────────────────────────────────────────
 
+# build_streaming_features — causal, incremental, no look-ahead
 def build_streaming_features(returns_df: pd.DataFrame,
                               window: int,
                               monday_eigvecs_k: np.ndarray,
@@ -187,28 +157,25 @@ def build_streaming_features(returns_df: pd.DataFrame,
                               monday_ev_ratios: np.ndarray,
                               q_threshold: float) -> pd.DataFrame:
     """
-    Computes the 7 features for every tick in returns_df.
-    Rows during the warmup window (first `window` ticks) are NaN
-    and will default to NORMAL per the assignment spec.
+Computes the 7-element feature vector for all ticks in the returns DataFrame.
 
-    CAUSALITY GUARANTEE:
-      At tick t, the feature vector uses only data[0 : t+1] — i.e. all
-      ticks up to and including t. No future tick is ever accessed.
+Note on Warmup: The first `window` ticks (100) are required to build the 
+initial covariance matrix. They will output NaN features and default to 
+the NORMAL regime.
 
-    Window choice: 100 ticks.
-      - Must be > n_assets = 12 (to estimate a full-rank covariance)
-      - Should be noticeably shorter than the 30-tick minimum episode
-        length so regime boundaries are resolved sharply
-      - 100 ticks ≈ a few minutes of intraday data — captures
-        intraday correlation structure without over-smoothing
+Architectural Parameters:
+- Window size (100): Chosen to be large enough for a stable, full-rank 
+  covariance (n=12), but small enough to resolve regime boundaries sharply 
+  without over-smoothing.
+- Causality: Features at tick `t` are generated strictly from the 
+  historical buffer `[t - window + 1 : t]`. No future data is accessed.
 
-    args:
-      monday_eigvecs_k : (K, 12) — top-K Monday eigenvectors (for Q stat)
-      monday_eigvecs_2 : (2, 12) — top-2 Monday eigenvectors (for subspace angle)
-      train_mean       : (12,)   — Monday column means (for Q stat centering)
-      monday_ev_ratios : (2,)    — [ev1_mon, ev2_mon] reference values
-      q_threshold      : float   — empirical 99th-pctile Q from Monday (for info only)
-    """
+Args:
+    monday_eigvecs_k, monday_eigvecs_2: Baseline Monday subspaces.
+    train_mean: Monday column means for residual centering.
+    monday_ev_ratios: Reference eigenvalue ratios for drift tracking.
+    q_threshold: Monday's 99th-percentile Q limit.
+"""
     data = np.ascontiguousarray(returns_df.values, dtype=np.float64)
     n_ticks, n_assets = data.shape
 
@@ -220,26 +187,26 @@ def build_streaming_features(returns_df: pd.DataFrame,
 
     for t in range(n_ticks):
         r   = data[t]
-        cov = engine.push(r)     # window now contains data[max(0,t-w+1) : t+1]
+        cov = engine.push(r)  # window now contains data[max(0,t-w+1) : t+1]
 
         if cov is None:
-            continue             # window not yet full → leave as NaN
+            continue      # window not yet full → leave as NaN
 
         total_var = np.maximum(np.trace(cov), 1e-15)
 
-        # ── Eigenvalue ratios (from rolling covariance, describes history) ──
+        #Eigenvalue ratios (from rolling covariance, describes history) 
         vals = np.linalg.eigvalsh(cov)[::-1]   # descending
         ev1  = vals[0] / total_var
         ev2  = vals[1] / total_var
 
-        # ── Mean pairwise correlation ────────────────────────────────────────
+        # Mean pairwise correlation 
         std = np.sqrt(np.diag(cov))
         std = np.where(std < 1e-10, 1e-10, std)
         corr     = cov / np.outer(std, std)
         idx_u    = np.triu_indices(n_assets, k=1)
         mean_corr = float(corr[idx_u].mean())
 
-        # ── Q-statistic vs Monday model ──────────────────────────────────────
+        #  Q-statistic vs Monday model 
         # Centred by Monday mean — not the rolling mean — to stay consistent
         # with the Monday PCA model's coordinate system.
         r_c      = r - train_mean
@@ -248,13 +215,13 @@ def build_streaming_features(returns_df: pd.DataFrame,
         contrib  = residual ** 2
         max_share = float(contrib.max() / (q_t + 1e-15))
 
-        # ── Subspace angle: rolling top-2 vs Monday top-2 ───────────────────
+        # Subspace angle: rolling top-2 vs Monday top-2 
         # eigvalsh returns ascending; last 2 columns = top-2 eigenvectors
         _, vecs  = np.linalg.eigh(cov)
         V_roll   = np.ascontiguousarray(vecs[:, -2:].T)   # (2, 12)
         angle_deg = fast_subspace_angle_deg(monday_eigvecs_2, V_roll)
 
-        # ── ev1 delta ────────────────────────────────────────────────────────
+        #  ev1 delta 
         ev1_delta = abs(ev1 - monday_ev_ratios[0])
 
         out[t] = [ev1, ev2, mean_corr, q_t, angle_deg, max_share, ev1_delta]
@@ -262,18 +229,19 @@ def build_streaming_features(returns_df: pd.DataFrame,
     return pd.DataFrame(out, index=returns_df.index, columns=FEAT_NAMES)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Threshold calibration (from Wednesday labelled data)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def calibrate_thresholds(features_wed: pd.DataFrame,
                           labels_wed: pd.Series) -> dict:
     """
-    For each regime, use the 10th percentile of that regime's feature
-    distribution as the detection threshold — i.e. 90% of true examples
-    are above the threshold, balancing precision vs recall.
-    Falls back to conservative defaults if a regime has < 50 examples.
-    """
+Calibrates regime-specific thresholds using the 10th percentile of each feature's 
+distribution to balance precision and recall. 
+
+Includes a safety fallback to conservative defaults if a regime contains fewer 
+than 50 samples to prevent overfitting on sparse data.
+"""
     merged = features_wed.join(labels_wed.rename("regime"), how="inner").dropna()
 
     def regime_quantile(regime, feat, q=0.10, default=None):
@@ -289,24 +257,24 @@ def calibrate_thresholds(features_wed: pd.DataFrame,
         "sr_thresh":  regime_quantile("SECTOR_ROTATION",  "ev_ratio_pc1_delta", 0.10, 0.05),
         "q_thresh":   None,   # filled in from Part 2 empirical threshold
     }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Vectorised prediction (batch path — no Python row loop)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def vectorized_predict(features_df: pd.DataFrame, thresholds: dict,
                         q_thresh: float) -> pd.Series:
     """
-    Applies the decision tree using numpy boolean mask arrays.
-    No Python loop over rows — runs in milliseconds for 30k rows.
+Vectorized execution of the regime classification decision tree. 
 
-    Priority (applied in reverse order so higher-priority overwrites):
-      NORMAL             — default
-      SECTOR_ROTATION    — ev_ratio_pc1_delta above threshold
-      CORRELATION_BREAK  — subspace_angle_deg above threshold
-      FAT_FINGER         — max_contrib_share AND q_stat both above threshold
-    """
+Uses pure NumPy boolean masking to process historical matrices efficiently. 
+The classification cascade evaluates in reverse order, ensuring that 
+severe, high-priority anomalies seamlessly overwrite lower-priority states.
+
+Evaluation Hierarchy (Highest to Lowest Priority):
+1. FAT_FINGER: Breaches in both Q-statistic and max_contrib_share.
+2. CORRELATION_BREAK: Severe drift in subspace_angle_deg.
+3. SECTOR_ROTATION: Anomalous shifts in the PC1 eigenvalue ratio.
+4. NORMAL: Baseline state.
+"""
     ff  = features_df["max_contrib_share"].values
     ang = features_df["subspace_angle_deg"].values
     ev1d = features_df["ev_ratio_pc1_delta"].values
@@ -324,21 +292,17 @@ def vectorized_predict(features_df: pd.DataFrame, thresholds: dict,
 
     return pd.Series(labels, index=features_df.index, dtype=str)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Vectorised temporal smoothing (no Python loop)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def vectorized_smooth(labels_series: pd.Series, smoothing: int = 5) -> pd.Series:
     """
-    Commits to a new label only after `smoothing` consecutive identical ticks.
-    Implemented without a Python for loop using numpy stride tricks.
+Temporal smoothing filter for the classification stream.
 
-    Why smoothing=5?
-      Episodes last ≥ 30 ticks. A 5-tick confirmation window catches
-      true transitions within 5 ticks of onset while rejecting single-tick
-      noise spikes. False positive bursts shorter than 5 ticks are suppressed.
-    """
+Acts as a high-pass filter for state changes. By requiring 5 consecutive 
+identical ticks before committing to a regime flip, it ignores isolated 
+micro-bursts and transient noise. Since true market episodes persist for 
+at least 30 ticks, this 5-tick delay represents an optimal tradeoff 
+between detection latency and precision.
+"""
     REGIME_MAP = {r: i for i, r in enumerate(REGIMES)}
     REGIME_INV = {i: r for r, i in REGIME_MAP.items()}
 
@@ -373,10 +337,7 @@ def vectorized_smooth(labels_series: pd.Series, smoothing: int = 5) -> pd.Series
         dtype=str
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # RegimeClassifier — both batch and live-tick interfaces
-# ─────────────────────────────────────────────────────────────────────────────
 
 class RegimeClassifier:
     """
@@ -404,20 +365,23 @@ class RegimeClassifier:
         self.q_thresh   = q_thresh
         return self
 
-    # ── Batch path ───────────────────────────────────────────────────────────
+    #  Batch path 
     def predict_batch(self, features_df: pd.DataFrame) -> pd.Series:
         """Vectorised boolean masks + temporal smoothing. Fast for 30k rows."""
         raw = vectorized_predict(features_df, self.thresholds, self.q_thresh)
         return vectorized_smooth(raw, self.smoothing)
 
-    # ── Live single-row path (Bonus pipeline) ────────────────────────────────
+    #  Live single-row path (Bonus pipeline) 
     def predict_single(self, feat_row: np.ndarray) -> str:
         """
-        feat_row: 1-D numpy array in the order defined by FEAT_NAMES.
-        Returns one of REGIMES.
-        No Pandas, no DataFrame — called once per tick in step().
-        Takes < 1 µs.
-        """
+Single-tick inference for the live pipeline.
+Args:
+    feat_row (np.ndarray): 1-D array aligned with FEAT_NAMES.
+Returns:
+    str: The predicted regime label.
+Note: Optimized for the hot path. All Pandas/DataFrame overhead is stripped 
+for microsecond execution within the `step()` loop.
+"""
         if np.any(np.isnan(feat_row)):
             return "NORMAL"
 
@@ -435,10 +399,8 @@ class RegimeClassifier:
         return "NORMAL"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Evaluation helpers (Part 3c)
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Evaluation helpers (Part 3c)
 def evaluate_on_wednesday(preds_wed: pd.Series,
                            labels_wed_path: str = "data/labels_wed.csv") -> dict:
     """
@@ -461,9 +423,8 @@ def evaluate_on_wednesday(preds_wed: pd.Series,
     return {"macro_f1": macro}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Submission CSV builder (Part 3d)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_submission_csv(preds_thu: pd.Series, team_number: str,
                           output_dir: str = ".") -> str:
