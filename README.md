@@ -9,7 +9,7 @@ Two linked quantitative problems from the JPMorgan Chase QMP 2026 case study, so
 |---|---|
 | **Language** | Python 3.13 (NumPy, pandas, SciPy, scikit-learn, Numba, matplotlib) |
 | **Format** | Two Jupyter notebooks plus a modular `src/` package for Problem Statement 2 |
-| **Problem statement** | [`docs/QMP26_Problem_Statements.pdf`](docs/QMP26_Problem_Statements.pdf) |
+| **Problem statement** | [`QMP26 PROBLEM STATEMENTS 1.pdf`](problem%20statement/QMP-Case%20study%20%28PS%2Bdata%29/QMP26%20PROBLEM%20STATEMENTS%201.pdf) |
 | **Team** | Team 6 |
 
 ---
@@ -173,7 +173,7 @@ Per class in the notebook run:
 | SECTOR_ROTATION | 0.97 | 0.90 | 0.93 |
 | CORRELATION_BREAK | 0.97 | 0.89 | 0.93 |
 
-Wednesday is also the calibration set, so these scores are in-sample (see [Known limitations](#known-limitations)). The tuning history is in [`experiment_log.md`](Problem_Statement_2/experiment_log.md). `SECTOR_ROTATION` is the hardest regime to detect: it changes how variance is split between factors without adding an outlier asset or rotating the eigenvectors.
+Wednesday is also the calibration set, so these scores are in-sample (see [Known limitations](#known-limitations)). The tuning history is in [`experiment_log.md`](experiment_log.md). `SECTOR_ROTATION` is the hardest regime to detect: it changes how variance is split between factors without adding an outlier asset or rotating the eigenvectors.
 
 ### Part 4: The Kill-Switch
 
@@ -200,7 +200,7 @@ These come from re-running both notebooks and the backtester from a clean enviro
 - **Dynamic barriers did not reduce ruin in the synthetic ensemble.** Over 1,000 simulated Tuesday sessions, ruin was **23.2 %** with fixed barriers and **27.7 %** with anomaly-driven barriers. This is consistent with tighter barriers being easier to hit, so the barrier policy needs more tuning. The notebook's written discussion claims a reduction from 48 % to about 10 %, which its own output does not show.
 - **The bonus demo ends in a kill-switch event.** In the demo run the alert at tick 500 tightened the barriers while inventory was +27, so the kill switch fired (verdict `RUIN`).
 - **Latency.** The streaming detector averages 2.6 µs per tick, with a worst case of 57.6 µs against the 50 µs target.
-- **Two Thursday submissions exist.** `Team_6_submission.csv` is the notebook's output. `p5_backtester.py` writes `Team_6_submission_backtester.csv` using the tuned thresholds, and the two disagree on about 4.5 % of rows.
+- **`p5_backtester.py` overwrites the notebook's submission.** `Team_6_submission.csv` in the repository is the notebook's output. Re-running `p5_backtester.py` writes its own predictions, from the hand-tuned thresholds, straight over that same path. The two disagree on about 4.5 % of rows, so commit or copy the file you want before re-running.
 - **Cosmetic.** Some saved notebook outputs contain warnings with the authors' local file paths, and `bonus_pipeline.py` triggers a pandas `"1H"` deprecation warning.
 
 ---
@@ -225,7 +225,7 @@ jupyter nbconvert --to notebook --execute --inplace Team_6.ipynb
 python src/p5_backtester.py
 ```
 
-`p5_backtester.py` appends a row to `experiment_log.md` and writes `Team_6_submission_backtester.csv`, leaving the notebook's submission untouched. To also commit and push the log, run it with `QMP_GIT_PUSH=1`.
+`p5_backtester.py` appends a row to `Problem_Statement_2/experiment_log.md` and overwrites `Problem_Statement_2/Team_6_submission.csv`. Note that it also runs `git add` and `git commit` on every run, with no opt-in flag, so run it on a clean branch if you do not want the commit.
 
 Numba compiles the streaming kernel on first use and caches it, so the first run of the Part 2 cells is slower.
 
@@ -237,16 +237,16 @@ Numba compiles the streaming kernel on first use and caches it, so the first run
 .
 ├── README.md
 ├── requirements.txt
-├── docs/
-│   └── QMP26_Problem_Statements.pdf        # the original problem statements
+├── experiment_log.md                       # threshold tuning history
+├── problem statement/
+│   └── QMP-Case study (PS+data)/
+│       └── QMP26 PROBLEM STATEMENTS 1.pdf  # the original problem statements
 ├── assets/                                 # figures used in this README
 ├── Problem_Statement_1/
 │   └── Team_6.ipynb                        # PCA factor models, 6 parts
 └── Problem_Statement_2/
     ├── Team_6.ipynb                        # Phantom Lattice, 4 parts + bonus
     ├── Team_6_submission.csv               # Thursday regime predictions (notebook)
-    ├── experiment_log.md                   # threshold tuning history
-    ├── experiment_log_raw.md               # original, unedited log
     ├── data/                               # Monday to Thursday ticks, Wednesday labels
     └── src/
         ├── p1_blind_cartographer.py

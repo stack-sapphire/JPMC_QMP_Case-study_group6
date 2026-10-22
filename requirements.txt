@@ -1,0 +1,10 @@
+# Python 3.11+
+# pandas must stay on 2.x: the Problem Statement 2 notebook calls
+# index.round("S"), which pandas 3 no longer accepts.
+numpy>=1.26
+pandas>=2.0,<3.0
+scipy>=1.11
+scikit-learn>=1.3
+numba>=0.59
+matplotlib>=3.8
+jupyter>=1.0
